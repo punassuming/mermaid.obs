@@ -1,0 +1,30 @@
+/* Mermaid Tools styles */
+.mt-mermaid-wrap {
+  position: relative;
+  overflow: hidden;
+}
+
+.mt-mermaid-wrap .mt-mermaid-svg {
+  width: 100% !important;
+  height: auto !important;
+  transition: transform 0.15s ease-in-out;
+  transform-origin: center center;
+  cursor: zoom-in;
+}
+
+.mt-mermaid-wrap.mt-hover {
+  overflow: visible;
+  z-index: 5;
+}
+
+.mt-mermaid-wrap.mt-hover .mt-mermaid-svg {
+  transform: scale(1.5);
+  cursor: zoom-out;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.25);
+}
+
+/* File view container */
+.view-content .mt-mermaid-file {
+  padding: 16px;
+}
+
