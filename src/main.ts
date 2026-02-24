@@ -99,7 +99,6 @@ async function uniquePath(app: App, folder: string, base: string, ext: string): 
 	let n = 1;
 	while (true) {
 		const candidate = (folder ? folder + '/' : '') + `${base}${n > 1 ? '-' + n : ''}.${ext}`;
-		// eslint-disable-next-line no-await-in-loop
 		const exists = await app.vault.adapter.exists(candidate);
 		if (!exists) return candidate;
 		n++;
@@ -139,7 +138,7 @@ class MermaidFileView extends TextFileView {
 		this.contentEl.empty();
 	}
 
-	async setViewData(data: string, clear: boolean): Promise<void> {
+	setViewData(data: string, clear: boolean): void {
 		if (clear) this.clear();
 		this.clear();
 		const container = this.contentEl.createDiv({ cls: 'mermaid' });
