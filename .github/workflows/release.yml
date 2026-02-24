@@ -1,0 +1,49 @@
+name: Release Obsidian Plugin
+
+on:
+  workflow_run:
+    workflows: ["Auto Version Bump"]
+    types: [completed]
+
+jobs:
+  build:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build plugin
+        run: npm run build
+
+      - name: Determine latest tag
+        id: tag
+        run: |
+          git fetch --tags
+          TAG=$(git describe --tags --abbrev=0)
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.tag }}
+          files: |
+            manifest.json
+            main.js
+            styles.css
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -21,8 +21,11 @@ if (!existsSync("src/main.ts")) {
 // If we have source files, run TypeScript check and esbuild
 console.log("Building from source...");
 
-// Run TypeScript check
-const tsc = spawn('tsc', ['-noEmit', '-skipLibCheck'], { stdio: 'inherit' });
+// Run TypeScript check by invoking tsc via Node directly (cross-platform, no shell needed)
+import { createRequire } from 'module';
+const _require = createRequire(import.meta.url);
+const tscScript = _require.resolve('typescript/bin/tsc');
+const tsc = spawn(process.execPath, [tscScript, '-noEmit', '-skipLibCheck'], { stdio: 'inherit' });
 
 tsc.on('error', (err) => {
 	console.error(`✗ Failed to spawn tsc: ${err.message}`);

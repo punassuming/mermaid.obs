@@ -1,0 +1,98 @@
+name: Auto Version Bump
+
+on:
+  pull_request:
+    types: [closed]
+    branches:
+      - main
+
+jobs:
+  bump-version:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email \
+            "github-actions[bot]@users.noreply.github.com"
+
+      - name: Determine version bump type
+        id: bump_type
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          if printf '%s\n' "$PR_TITLE" | \
+             grep -qiE '\[major\]|breaking change|major version'; then
+            echo "type=major" >> $GITHUB_OUTPUT
+          elif printf '%s\n' "$PR_TITLE" | \
+               grep -qiE '\[minor\]|feature|enhancement|minor version'; then
+            echo "type=minor" >> $GITHUB_OUTPUT
+          else
+            echo "type=patch" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Bump version
+        id: version
+        run: |
+          CURRENT_VERSION=$(node -p "require('./package.json').version")
+          echo "Current version: $CURRENT_VERSION"
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT_VERSION"
+          BUMP_TYPE="${{ steps.bump_type.outputs.type }}"
+          if [ "$BUMP_TYPE" = "major" ]; then
+            MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0
+          elif [ "$BUMP_TYPE" = "minor" ]; then
+            MINOR=$((MINOR + 1)); PATCH=0
+          else
+            PATCH=$((PATCH + 1))
+          fi
+          NEW_VERSION="$MAJOR.$MINOR.$PATCH"
+          echo "New version: $NEW_VERSION ($BUMP_TYPE bump)"
+          echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Update package.json version
+        run: npm version ${{ steps.version.outputs.version }} --no-git-tag-version
+
+      - name: Update manifest.json and versions.json
+        run: npm run version
+
+      - name: Commit version bump
+        run: |
+          NEW_VERSION="${{ steps.version.outputs.version }}"
+          git add package.json package-lock.json manifest.json versions.json
+          git commit -m "chore: bump version to $NEW_VERSION"
+          MAX_RETRIES=3
+          RETRY_COUNT=0
+          until git push origin main || [ $RETRY_COUNT -eq $MAX_RETRIES ]; do
+            RETRY_COUNT=$((RETRY_COUNT + 1))
+            echo "Push failed, retrying ($RETRY_COUNT/$MAX_RETRIES)..."
+            git pull --rebase origin main
+          done
+          if [ $RETRY_COUNT -eq $MAX_RETRIES ]; then
+            echo "Failed to push after $MAX_RETRIES attempts"
+            exit 1
+          fi
+
+      - name: Create and push tag
+        run: |
+          NEW_VERSION="${{ steps.version.outputs.version }}"
+          git tag "$NEW_VERSION"
+          git push origin "$NEW_VERSION"
