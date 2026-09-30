@@ -1,6 +1,6 @@
 {
 	"name": "obsidian-mermaid-tools",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"description": "Enhance Mermaid diagrams: fit-to-screen with hover zoom, right-click export to SVG/PNG, and .mermaid file viewing.",
 	"main": "main.js",
 	"type": "module",

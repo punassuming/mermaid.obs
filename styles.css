@@ -2,6 +2,12 @@
 .mt-mermaid-wrap {
   position: relative;
   overflow: hidden;
+  container-type: inline-size;
+}
+
+.mt-mermaid-wrap:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 2px;
 }
 
 .mt-mermaid-wrap .mt-mermaid-svg {
@@ -23,8 +29,13 @@
   box-shadow: 0 2px 12px rgba(0,0,0,0.25);
 }
 
+@container (max-width: 480px) {
+  .mt-mermaid-wrap.mt-hover .mt-mermaid-svg {
+    transform: scale(1.2);
+  }
+}
+
 /* File view container */
 .view-content .mt-mermaid-file {
   padding: 16px;
 }
-

@@ -1,7 +1,7 @@
 {
 	"id": "mermaid-tools",
 	"name": "Mermaid Tools",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"minAppVersion": "1.2.0",
 	"description": "Enhance Mermaid diagrams: fit-to-screen with hover zoom, right-click export to SVG/PNG, and .mermaid file viewing.",
 	"author": "punassuming",
@@ -9,4 +9,3 @@
 	"fundingUrl": "https://ko-fi.com/rich_alesi",
 	"isDesktopOnly": false
 }
-

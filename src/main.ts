@@ -5,8 +5,7 @@ const VIEW_TYPE = 'mermaid-tools-view';
 declare global {
 	interface Window {
 		mermaid?: {
-			initialize?: (config: Record<string, unknown>) => void;
-			init?: (config: undefined, el: Element) => void;
+			init?: (config: undefined, el: Element) => void | Promise<void>;
 		};
 	}
 }
@@ -14,8 +13,9 @@ declare global {
 function isMermaidSvg(el: Element): el is SVGSVGElement {
 	try {
 		if (!(el instanceof SVGSVGElement)) return false;
-		if (el.id && el.id.startsWith('mermaid-')) return true;
-		if (el.closest('.mermaid')) return true;
+		// Mermaid renders the diagram root as a direct child of its .mermaid host.
+		// Checking any ancestor would also classify SVG icons inside the diagram.
+		if (el.parentElement?.classList.contains('mermaid')) return true;
 	} catch (_) {}
 	return false;
 }
@@ -39,6 +39,8 @@ function serializeSvg(svg: SVGSVGElement): string {
 }
 
 async function svgToPngArrayBuffer(svg: SVGSVGElement): Promise<ArrayBuffer> {
+	const maxSide = 8192;
+	const maxPixels = 16_000_000;
 	const svgString = serializeSvg(svg);
 	const blob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
 	const url = URL.createObjectURL(blob);
@@ -59,9 +61,13 @@ async function svgToPngArrayBuffer(svg: SVGSVGElement): Promise<ArrayBuffer> {
 			vb && vb.height
 				? vb.height
 				: parseFloat(svg.getAttribute('height') ?? '') || svg.getBBox().height || 600;
+		if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+			throw new Error('Diagram dimensions are invalid');
+		}
+		const scale = Math.min(1, maxSide / width, maxSide / height, Math.sqrt(maxPixels / (width * height)));
 		const canvas = document.createElement('canvas');
-		canvas.width = Math.ceil(width);
-		canvas.height = Math.ceil(height);
+		canvas.width = Math.max(1, Math.floor(width * scale));
+		canvas.height = Math.max(1, Math.floor(height * scale));
 		const ctx = canvas.getContext('2d');
 		if (!ctx) throw new Error('Could not get canvas 2d context');
 		ctx.fillStyle = '#ffffff';
@@ -78,10 +84,13 @@ async function svgToPngArrayBuffer(svg: SVGSVGElement): Promise<ArrayBuffer> {
 
 async function ensureFolderExists(app: App, folderPath: string): Promise<void> {
 	if (!folderPath) return;
+	if (await app.vault.adapter.exists(folderPath)) return;
 	try {
-		const exists = await app.vault.adapter.exists(folderPath);
-		if (!exists) await app.vault.createFolder(folderPath);
-	} catch (_) {}
+		await app.vault.createFolder(folderPath);
+	} catch (error) {
+		// Another export may have created this folder between the existence check and create.
+		if (!(await app.vault.adapter.exists(folderPath))) throw error;
+	}
 }
 
 function pathParts(path: string): { folder: string; name: string } {
@@ -95,14 +104,34 @@ function basenameNoExt(name: string): string {
 	return i === -1 ? name : name.substring(0, i);
 }
 
-async function uniquePath(app: App, folder: string, base: string, ext: string): Promise<string> {
+async function createUniqueExport(
+	app: App,
+	folder: string,
+	base: string,
+	ext: string,
+	content: string | ArrayBuffer
+): Promise<string> {
 	let n = 1;
 	while (true) {
 		const candidate = (folder ? folder + '/' : '') + `${base}${n > 1 ? '-' + n : ''}.${ext}`;
-		const exists = await app.vault.adapter.exists(candidate);
-		if (!exists) return candidate;
-		n++;
+		if (await app.vault.adapter.exists(candidate)) {
+			n++;
+			continue;
+		}
+		try {
+			if (typeof content === 'string') await app.vault.create(candidate, content);
+			else await app.vault.createBinary(candidate, content);
+			return candidate;
+		} catch (error) {
+			// Retry only when a competing export created this exact path.
+			if (!(await app.vault.adapter.exists(candidate))) throw error;
+			n++;
+		}
 	}
+}
+
+function errorMessage(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
 }
 
 class MermaidFileView extends TextFileView {
@@ -143,14 +172,18 @@ class MermaidFileView extends TextFileView {
 		this.clear();
 		const container = this.contentEl.createDiv({ cls: 'mermaid' });
 		container.textContent = data || '';
+		this.plugin.trackSourcePath(this.contentEl, this.file?.path ?? '');
+		void this.renderDiagram();
+	}
+
+	private async renderDiagram(): Promise<void> {
 		try {
 			const mermaid = window.mermaid;
-			if (!mermaid) {
+			if (!mermaid?.init) {
 				new Notice('Mermaid plugin not available. Enable the core Mermaid plugin.');
 				return;
 			}
-			if (mermaid.initialize) mermaid.initialize({ startOnLoad: false, securityLevel: 'loose' });
-			if (mermaid.init) mermaid.init(undefined, this.contentEl);
+			await mermaid.init(undefined, this.contentEl);
 			this.contentEl.querySelectorAll('svg').forEach((svg) => {
 				if (isMermaidSvg(svg)) this.plugin.enhanceMermaidSvg(svg, this.file?.path ?? '');
 			});
@@ -163,6 +196,7 @@ class MermaidFileView extends TextFileView {
 
 export default class MermaidToolsPlugin extends Plugin {
 	private diagramCounter: Map<string, number> = new Map();
+	private sourcePaths = new WeakMap<Element, string>();
 
 	constructor(app: App, manifest: PluginManifest) {
 		super(app, manifest);
@@ -170,8 +204,10 @@ export default class MermaidToolsPlugin extends Plugin {
 
 	async onload(): Promise<void> {
 		this.diagramCounter = new Map();
+		this.sourcePaths = new WeakMap<Element, string>();
 
 		this.registerMarkdownPostProcessor((el, ctx) => {
+			this.trackSourcePath(el, ctx.sourcePath);
 			window.requestAnimationFrame(() => {
 				el.querySelectorAll('svg').forEach((svg) => {
 					if (!isMermaidSvg(svg)) return;
@@ -192,7 +228,8 @@ export default class MermaidToolsPlugin extends Plugin {
 					svgs.forEach((svg) => {
 						if (!isMermaidSvg(svg)) return;
 						if (svg.dataset['mtProcessed']) return;
-						this.enhanceMermaidSvg(svg, '');
+						const sourcePath = this.sourcePathFor(svg);
+						if (sourcePath !== undefined) this.enhanceMermaidSvg(svg, sourcePath);
 					});
 				});
 			}
@@ -202,6 +239,20 @@ export default class MermaidToolsPlugin extends Plugin {
 
 		this.registerView(VIEW_TYPE, (leaf) => new MermaidFileView(leaf, this));
 		this.registerExtensions(['mermaid', 'mmd'], VIEW_TYPE);
+	}
+
+	trackSourcePath(el: Element, sourcePath: string): void {
+		this.sourcePaths.set(el, sourcePath);
+	}
+
+	private sourcePathFor(el: Element): string | undefined {
+		let current: Element | null = el;
+		while (current) {
+			const sourcePath = this.sourcePaths.get(current);
+			if (sourcePath !== undefined) return sourcePath;
+			current = current.parentElement;
+		}
+		return undefined;
 	}
 
 	onunload(): void {}
@@ -221,18 +272,73 @@ export default class MermaidToolsPlugin extends Plugin {
 
 			const wrap = document.createElement('div');
 			wrap.className = 'mt-mermaid-wrap';
-			svg.parentElement?.insertBefore(wrap, svg);
+			const originalParent = svg.parentElement;
+			if (!originalParent) {
+				delete svg.dataset['mtProcessed'];
+				return;
+			}
+			originalParent.insertBefore(wrap, svg);
 			wrap.appendChild(svg);
 
 			svg.classList.add('mt-mermaid-svg');
 
-			const onEnter = () => wrap.classList.add('mt-hover');
-			const onLeave = () => wrap.classList.remove('mt-hover');
+			wrap.tabIndex = 0;
+			wrap.setAttribute('role', 'button');
+			wrap.setAttribute('aria-label', 'Zoom Mermaid diagram');
+			wrap.setAttribute('aria-pressed', 'false');
+			let hovered = false;
+			let toggledZoom = false;
+			const updateZoom = () => {
+				const zoomed = hovered || toggledZoom;
+				wrap.classList.toggle('mt-hover', zoomed);
+				wrap.setAttribute('aria-pressed', String(zoomed));
+			};
+			const onEnter = () => {
+				hovered = true;
+				updateZoom();
+			};
+			const onLeave = () => {
+				hovered = false;
+				updateZoom();
+			};
+			const onClick = (evt: MouseEvent) => {
+				if (!window.matchMedia('(hover: none) and (pointer: coarse)').matches) return;
+				if (!(evt.target instanceof Element) || evt.target.closest('a')) return;
+				toggledZoom = !toggledZoom;
+				updateZoom();
+			};
+			const onKeyDown = (evt: KeyboardEvent) => {
+				if (evt.key === 'Enter' && !evt.repeat) {
+					evt.preventDefault();
+					toggledZoom = !toggledZoom;
+					updateZoom();
+				} else if (evt.key === ' ') {
+					evt.preventDefault();
+				} else if (evt.key === 'Escape') {
+					toggledZoom = false;
+					updateZoom();
+				}
+			};
+			const onKeyUp = (evt: KeyboardEvent) => {
+				if (evt.key !== ' ') return;
+				evt.preventDefault();
+				toggledZoom = !toggledZoom;
+				updateZoom();
+			};
 			wrap.addEventListener('mouseenter', onEnter);
 			wrap.addEventListener('mouseleave', onLeave);
+			wrap.addEventListener('click', onClick);
+			wrap.addEventListener('keydown', onKeyDown);
+			wrap.addEventListener('keyup', onKeyUp);
 			this.register(() => {
 				wrap.removeEventListener('mouseenter', onEnter);
 				wrap.removeEventListener('mouseleave', onLeave);
+				wrap.removeEventListener('click', onClick);
+				wrap.removeEventListener('keydown', onKeyDown);
+				wrap.removeEventListener('keyup', onKeyUp);
+				if (wrap.parentElement) wrap.replaceWith(svg);
+				svg.classList.remove('mt-mermaid-svg');
+				delete svg.dataset['mtProcessed'];
 			});
 
 			const index = this.nextDiagramIndex(sourcePath);
@@ -250,18 +356,17 @@ export default class MermaidToolsPlugin extends Plugin {
 								const base = basenameNoExt(name || 'diagram') + `-diagram-${index}`;
 								const outFolder = folder || 'Mermaid Exports';
 								await ensureFolderExists(this.app, outFolder);
-								const target = await uniquePath(this.app, outFolder, base, 'svg');
-								await this.app.vault.create(target, serializeSvg(svg));
+								const target = await createUniqueExport(this.app, outFolder, base, 'svg', serializeSvg(svg));
 								new Notice(`Saved SVG: ${target}`);
 							} catch (e) {
 								console.error(e);
-								new Notice('Failed to export SVG');
+								new Notice(`Failed to export SVG: ${errorMessage(e)}`);
 							}
 						})
 				);
 				menu.addItem((item) =>
 					item
-						.setTitle('Export as PNG')
+						.setTitle('Export as PNG (white background)')
 						.setIcon('image-file')
 						.onClick(async () => {
 							try {
@@ -269,13 +374,12 @@ export default class MermaidToolsPlugin extends Plugin {
 								const base = basenameNoExt(name || 'diagram') + `-diagram-${index}`;
 								const outFolder = folder || 'Mermaid Exports';
 								await ensureFolderExists(this.app, outFolder);
-								const target = await uniquePath(this.app, outFolder, base, 'png');
 								const arrayBuffer = await svgToPngArrayBuffer(svg);
-								await this.app.vault.createBinary(target, arrayBuffer);
-								new Notice(`Saved PNG: ${target}`);
+								const target = await createUniqueExport(this.app, outFolder, base, 'png', arrayBuffer);
+								new Notice(`Saved PNG (white background, size limited if needed): ${target}`);
 							} catch (e) {
 								console.error(e);
-								new Notice('Failed to export PNG');
+								new Notice(`Failed to export PNG: ${errorMessage(e)}`);
 							}
 						})
 				);
